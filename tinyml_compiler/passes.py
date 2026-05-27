@@ -106,10 +106,18 @@ def simulate_int8_linear_weights(graph: Graph) -> Graph:
     return g
 
 
-def optimize(graph: Graph) -> Graph:
+def optimize(graph: Graph, *, quantize: bool = False) -> Graph:
+    """Run graph optimization passes.
+
+    By default, optimize() only runs semantics-preserving passes.
+    Quantization changes numerical values, so it is opt-in.
+    """
     g = constant_folding(graph)
     g = fuse_linear_relu(g)
     g = cleanup_consecutive_transposes(g)
     g = dead_node_elimination(g)
-    g = simulate_int8_linear_weights(g)
+
+    if quantize:
+        g = simulate_int8_linear_weights(g)
+
     return g
