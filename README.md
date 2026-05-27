@@ -17,6 +17,7 @@ The goal is not to compete with TVM, XLA, ONNX Runtime, TensorRT, or other produ
 - NumPy runtime for executing graphs
 - Correctness tests comparing optimized and unoptimized graph outputs
 - Benchmarking harness for latency and memory estimates
+- Synthetic benchmark sweep over multiple MLP-style graph sizes
 
 ## Why this matters
 
@@ -33,6 +34,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q
 python benchmarks/run_benchmark.py
+python benchmarks/run_sweep.py
 ````
 
 Expected test result:
@@ -41,7 +43,7 @@ Expected test result:
 5 passed
 ```
 
-Example benchmark output:
+Example single-graph benchmark output:
 
 ```text
 | Variant   | Latency (ms) | Memory (KB) |
@@ -50,7 +52,20 @@ Example benchmark output:
 | Optimized |       0.0642 |       96.62 |
 ```
 
-The benchmark graph is intentionally small, so speedups are modest. The point is to demonstrate the compiler pipeline and measurement harness rather than claim production performance.
+Example benchmark sweep output:
+
+```text
+| Case   | Shape                | Nodes Base -> Opt | Baseline ms | Optimized ms | Speedup | Memory Base KB | Memory Opt KB | Max Abs Error |
+|--------|----------------------|------------------:|------------:|-------------:|--------:|---------------:|--------------:|--------------:|
+| tiny   | 32x64->128->32       |            4 -> 3 |      0.1150 |       0.1101 |   1.04x |          96.62 |         96.62 |      0.00e+00 |
+| small  | 64x256->512->128     |            4 -> 3 |      0.5711 |       0.2946 |   1.94x |        1154.50 |       1154.50 |      0.00e+00 |
+| medium | 128x512->2048->512   |            4 -> 3 |      4.4462 |       5.6128 |   0.79x |       11018.00 |      11018.00 |      0.00e+00 |
+| large  | 128x1024->4096->1024 |            4 -> 3 |     14.8306 |      13.4840 |   1.10x |       38420.00 |      38420.00 |      0.00e+00 |
+```
+
+The benchmark graphs are synthetic MLP-style graphs, not trained models. They are intended to stress the graph representation, optimization pipeline, runtime, and correctness checks.
+
+The latency results should not be interpreted as production performance claims. Since execution is still NumPy-backed, graph-level fusion does not necessarily behave like true low-level kernel fusion. The important result is that the optimizer changes graph structure while preserving numerical outputs.
 
 ## Compiler pipeline
 
@@ -69,6 +84,40 @@ The benchmark graph is intentionally small, so speedups are modest. The point is
 4. **Testing and benchmarking**
 
    Compare optimized and unoptimized outputs for numerical correctness, then measure latency and estimated memory usage.
+
+## Example graph
+
+The benchmark uses synthetic MLP-style graphs such as:
+
+```text
+x
+↓
+Linear
+↓
+ReLU
+↓
+Linear
+↓
+Softmax
+↓
+prob
+```
+
+After optimization, the first `Linear -> ReLU` pair can be fused:
+
+```text
+x
+↓
+FusedLinearReLU
+↓
+Linear
+↓
+Softmax
+↓
+prob
+```
+
+This reduces the active graph from 4 nodes to 3 nodes while preserving the final output.
 
 ## Semantics-preserving vs approximate passes
 
@@ -94,6 +143,14 @@ Key systems ideas:
 * **Backend targeting:** the same graph IR could eventually lower to CPU, GPU, DSP, NPU, or custom accelerator kernels.
 * **Correctness:** compiler optimizations must be validated against reference execution before performance claims matter.
 
+## What I learned
+
+One important design issue was separating exact graph optimizations from approximate inference transforms.
+
+Initially, the default optimizer included int8 weight quantization. Correctness tests caught output drift between the baseline graph and optimized graph, especially after softmax. I refactored the optimization API so that default optimization only runs semantics-preserving passes, while quantization is explicitly opt-in.
+
+This distinction matters in real ML systems: not every transformation has the same contract. Some passes should preserve outputs, while others trade numerical precision for memory, latency, or deployment efficiency.
+
 ## Current limitations
 
 This is a learning project, not a production compiler.
@@ -106,12 +163,15 @@ Current limitations:
 * No automatic differentiation
 * No advanced graph pattern matching
 * Quantization is simulated rather than fully calibrated
-* Benchmarks are small and mainly useful for checking the harness
+* Benchmarks are synthetic and mainly useful for checking the compiler/runtime pipeline
+* Fusion is graph-level only; it does not yet lower to custom fused C++/hardware kernels
 
 ## Future work
 
 * Add a narrow ONNX import path for simple MLPs
 * Implement C++/pybind11 kernels for selected operators
+* Add real low-level fused kernels for `Linear + ReLU`
+* Improve memory estimation to count only active tensors during optimized execution
 * Add operator cost models and pass-ordering experiments
 * Add larger benchmark graphs
 * Add simple hardware-aware tiling experiments for matrix multiplication
